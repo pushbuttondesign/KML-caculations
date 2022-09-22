@@ -5,6 +5,10 @@ MODULE DESCRIPTION
 Collection of tools for running caculations on Google Earth .kml files
 output by uBlox UConnect software. Parsing handled by pyKML library,
 based on lxml library.
+Note that KML cordinates format is decimal degrees:
+longitude, latitude, altitude in that order
+with negative values for west, south and below sea level
+the functions in this file all follow the same convention
 
 MODULE FEATURES
 read_ublox, parses a klm file output by ublox uconnect software
@@ -20,8 +24,6 @@ import math
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import pprint
-# start debugging
-import pdb
 
 def read_ublox(file):
     """
@@ -51,18 +53,18 @@ def read_ublox(file):
         for line in cordinates:
             cordinates = line.strip().split(',')
             if len(cordinates) == 3:
-                lat.append(float(cordinates[0]))
-                long.append(float(cordinates[1]))
+                long.append(float(cordinates[0]))
+                lat.append(float(cordinates[1]))
                 alt.append(float(cordinates[2]))
 
-        #remove the first 30 seconds
-        lat = lat[30:]
-        long = long[30:]
-        alt = alt[30:]
+        #remove the first 20 seconds
+        lat = lat[20:]
+        long = long[20:]
+        alt = alt[20:]
 
         #create pandas dataframe
         names = ['Longitude', 'Latitude', 'Altitude']
-        cordf = pandas.DataFrame(list(zip(lat,long,alt)), columns=names)
+        cordf = pandas.DataFrame(list(zip(long,lat,alt)), columns=names)
 
         return cordf
 
@@ -72,13 +74,13 @@ def position_diff(testcord, targetcord):
     compares test and target points and caculates distance in meters between them
 
     INPUTS
-    testcord, float tuple, latitude and longitude of test point in that order in decimal degrees
-    targetcord, float tuple, latitude and longitude of target point in that order in decimal degrees
+    testcord, float tuple, longitude, latitude of test point in that order in decimal degrees
+    targetcord, float tuple, longitude, latitude of target point in that order in decimal degrees
 
     OUTPUTS
     delta, string, distance in meters from given point
     """
-    return geopy.distance.distance(testcord, targetcord).m
+    return geopy.distance.distance((testcord[1], testcord[0]), (targetcord[1], targetcord[0])).m
 
 def line_straightness(cordf):
     """
@@ -114,8 +116,6 @@ def line_straightness(cordf):
     lat_range = max(lat_start, lat_stop) - min(lat_start, lat_stop)
     long_range = max(long_start, long_stop) - min(long_start, long_stop)
 
-    #pdb.set_trace()
-
     #create ideal line dataframe
     ideal_line = cordf.copy()
     for i, row in ideal_line.iterrows():
@@ -132,21 +132,21 @@ def line_straightness(cordf):
     #caculate the squared residule between each point in the lines
     error = cordf.copy()
     for i, row in cordf.iterrows():
-        error.iloc[i,1] = math.pow(ideal_line.iloc[i,1] - cordf.iloc[i,1], 2)
         error.iloc[i,0] = math.pow(ideal_line.iloc[i,0] - cordf.iloc[i,0], 2)
+        error.iloc[i,1] = math.pow(ideal_line.iloc[i,1] - cordf.iloc[i,1], 2)
 
     #caculate mean of the squared residuals
     mse = error.sum()
-    mse_lat = mse.loc["Latitude"] / len(error)
     mse_long = mse.loc["Longitude"] / len(error)
+    mse_lat = mse.loc["Latitude"] / len(error)
 
     #approximatly convert decimal degrees to meters
     #http://wiki.gis.com/wiki/index.php/Decimal_degrees
     earth_radius = geopy.distance.ELLIPSOIDS['WGS-84'][0] * 1000
     earth_circumfrence = 2 * math.pi * earth_radius
     deg_to_meter = earth_circumfrence / 360
-    mse_lat = mse_lat * deg_to_meter
     mse_long = mse_long * deg_to_meter
+    mse_lat = mse_lat * deg_to_meter
 
     #combine mse of latitude and longitude
     combined_mse = (mse_lat + mse_long) / 2
@@ -154,21 +154,41 @@ def line_straightness(cordf):
     #caculate square root of the mean
     rmse = math.sqrt(combined_mse)
 
+    #convert long, lat axis to approx change in meters from starting point
+    display_ax = cordf.copy()
+    for i, row in display_ax.iterrows():
+        if i == 0:
+            display_ax.iloc[0,0] = 0   #longitude start zeroed
+            display_ax.iloc[0,1] = 0   #latitude start zeroed
+        else:                       #swap long and lat to distance from start in meters
+            display_ax.iloc[i,0] = abs(position_diff( (cordf.iloc[0,0],0), (cordf.iloc[i,0],0) ))
+            display_ax.iloc[i,1] = abs(position_diff( (0,cordf.iloc[0,1]), (0,cordf.iloc[i,1]) ))
+
+    display_ln = ideal_line.copy()
+    for i, row in display_ln.iterrows():
+        if i == 0:
+            display_ln.iloc[0,0] = 0
+            display_ln.iloc[0,1] = 0
+        else:
+            display_ln.iloc[i,0] = abs(position_diff( (ideal_line.iloc[0,0],0), (ideal_line.iloc[i,0],0) ))
+            display_ln.iloc[i,1] = abs(position_diff( (0,ideal_line.iloc[0,1]), (0,ideal_line.iloc[i,1]) ))
+
+    #display graph
     plt.figure();
-    plt.scatter(cordf.iloc[:,0].tolist(), cordf.iloc[:,1].tolist(), color='blue', label="Measured Points");
-    plt.plot(ideal_line.iloc[:,0].tolist(), ideal_line.iloc[:,1].tolist(), color='green', label="Ideal Line")
+    plt.scatter(display_ax.iloc[:,0].tolist(), display_ax.iloc[:,1].tolist(), color='blue', label="Measured Points");
+    plt.plot(display_ln.iloc[:,0].tolist(), display_ln.iloc[:,1].tolist(), color='green', label="Ideal Line")
     plt.legend()
     plt.title("Measured line vs Ideal");
-    plt.xlabel("Longitude in Decimal Degrees");
-    plt.ylabel("Latitude in Decimal Degrees");
-    #plt.ylim(lat_start, lat_stop)
-    #plt.xlim(long_start, long_stop)
+    plt.xlabel("Distance along line of longitude in meters");
+    plt.ylabel("Distance along line of latitude in meters");
+    plt.ylim(bottom=0, top=max(display_ax.iloc[-1,1], display_ln.iloc[-1,1], display_ax.iloc[-1,0], display_ln.iloc[-1,0]))
+    plt.xlim(left=0, right=max(display_ax.iloc[-1,1], display_ln.iloc[-1,1], display_ax.iloc[-1,0], display_ln.iloc[-1,0]))
     yaxis = plt.gca().get_yticks()
     plt.gca().yaxis.set_major_locator(mticker.FixedLocator(yaxis))
-    plt.gca().set_yticklabels(['{:.6f}'.format(x) for x in yaxis])
+    plt.gca().set_yticklabels(['{:.2}'.format(x) for x in yaxis])
     xaxis = plt.gca().get_xticks()
     plt.gca().xaxis.set_major_locator(mticker.FixedLocator(xaxis))
-    plt.gca().set_xticklabels(['{:.6f}'.format(x) for x in xaxis])
+    plt.gca().set_xticklabels(['{:.2f}'.format(x) for x in xaxis])
     plt.grid(True);
     plt.show()
 
@@ -187,7 +207,7 @@ def main(argv):
     file = read_ublox(filepath)
 
     #print results
-    print("T0030 KML Analysis by Steve")
+    print("KML Analysis Results")
     print()
     print("*********")
     print("PRECISION")
@@ -197,14 +217,14 @@ def main(argv):
     precision = []
 
     #get the first 60 seconds of data
-    lat = file.iloc[:60,1].tolist()
     long = file.iloc[:60,0].tolist()
-    cords = zip(lat, long)
+    lat = file.iloc[:60,1].tolist()
+    cords = zip(long, lat)
 
     #plot scatter graph of first 60 seconds of data
     plt.figure();
     plt.scatter(long, lat, color='green');
-    plt.title("Plot of readings 0:30 to 1:30");
+    plt.title("Plot of readings 0:20 to 1:20");
     plt.xlabel("Longitude in Decimal Degrees");
     plt.ylabel("Latitude in Decimal Degrees");
     #plt.xlim(long[0], long[-1])
@@ -245,8 +265,8 @@ def main(argv):
     print("********")
 
     #Report the accuracy of a known distance
-    length = position_diff( (file.iloc[0,1], file.iloc[0,0]), \
-                            (file.iloc[len(file)-1,1], file.iloc[len(file)-1,0]))
+    length = position_diff( (file.iloc[0,0], file.iloc[0,1]), \
+                            (file.iloc[len(file)-1,0], file.iloc[len(file)-1,1]))
 
     print('Target line length was {}m'.format(line_length_meters))
     print('Measured line length = {}m'.format(length))
